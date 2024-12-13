@@ -1,0 +1,149 @@
+pipeline {
+    agent any
+    parameters {
+        gitParameter (
+            defaultValue: '0.0.0',
+            description: 'Version of Application for build (default: 0.0.0)',
+            name: 'GIT_TAG_TO_DEPLOY',
+            quickFilterEnabled: true,
+            selectedValue: 'TOP',
+            sortMode: 'ASCENDING_SMART',
+            tagFilter: 'refs/tags/[0-9]*',
+            type: 'PT_TAG',
+            listSize: '15'
+        )
+    }
+    options {        
+        timestamps()
+    }
+    environment {
+        aws_region  = "eu-central-1"
+        app_name    = "myapp"        
+    }
+    stages {
+        stage('checkout') {
+            steps {
+                cleanWs()
+                println "[INFO] Checking out code level: ${GIT_TAG_TO_DEPLOY} ***"
+                checkout([$class: 'GitSCM', \
+                                branches: [[name: "${GIT_TAG_TO_DEPLOY}"]], \
+                                doGenerateSubmoduleConfigurations: false, \
+                                extensions: [], \
+                                submoduleCfg: [], \
+                                userRemoteConfigs: [[credentialsId: 'jenkins_cicd', \
+                                url: "https://git.epam.com/Aliaksei_Dzemidchuk/devopsbasics-cicd.git"]]])
+            }
+        }
+        stage("Sonarqube scan") {
+            steps {
+                script {
+                    def scannerHome = tool 'SonarQube Scanner 6.1';
+                    withSonarQubeEnv("sonar") {
+                        sh "${scannerHome}/bin/sonar-scanner -Dsonar.core.serverBaseURL=http://${dns_host_name}:9000"
+                    }
+                }
+
+                timeout(time: 3, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+        stage('Quality Gate') {
+            steps {
+                
+            }
+        }
+
+        stage('Unit Test') {
+            options {
+                timeout(time: 30, unit: 'MINUTES')
+            }
+            steps {
+                script {
+                    sh '''
+                      docker build -f Dockerfile.test -t ${app_name}-test:test .
+                      docker run ${app_name}-test:test
+                    '''
+                }
+            }
+        }
+        stage('Docker build') {
+            options {
+                timeout(time: 30, unit: 'MINUTES')
+            }
+            steps {
+                script {
+                    sh '''
+                      docker build -f Dockerfile.bugless -t ${app_name}:${GIT_TAG_TO_DEPLOY} .
+                      docker images | grep ${app_name}
+                    '''
+                }
+            }
+        }
+        stage('Image push to nexus') {
+            options {
+                timeout(time: 30, unit: 'MINUTES')
+            }
+            steps {
+                withCredentials([
+                    usernamePassword(credentialsId: 'nexus_test', passwordVariable: 'NEXUS_PASS', usernameVariable: 'NEXUS_USER')])
+                {
+                    script {
+                        sh '''
+                        #  echo "Test1234567890" > test.txt
+                        #  curl -u $NEXUS_USER:$NEXUS_PASS --upload-file test.txt http://nexus:8081/repository/my-repo
+                          docker login localhost:5000 -u $NEXUS_USER -p $NEXUS_PASS
+                          docker tag ${app_name}:${GIT_TAG_TO_DEPLOY} localhost:5000/${app_name}:${GIT_TAG_TO_DEPLOY}
+                          docker push localhost:5000/${app_name}:${GIT_TAG_TO_DEPLOY}
+                          docker system prune -af
+                        '''
+                    }
+                }
+            }
+        }
+        stage('Deploy application') {
+            options {
+                timeout(time: 30, unit: 'MINUTES')
+            }
+            steps {
+                withCredentials([
+                    usernamePassword(credentialsId: 'nexus_test', passwordVariable: 'NEXUS_PASS', usernameVariable: 'NEXUS_USER')])
+                {
+                    script {
+                        sh '''
+                        #  echo "Test1234567890" > test.txt
+                        #  curl -u $NEXUS_USER:$NEXUS_PASS --upload-file test.txt http://nexus:8081/repository/my-repo
+                          docker login localhost:5000 -u $NEXUS_USER -p $NEXUS_PASS
+                          docker pull localhost:5000/${app_name}:${GIT_TAG_TO_DEPLOY}
+                          docker stop ${app_name} || true && docker rm ${app_name} || true
+                          docker run --rm --network cicd_network -e TAG=${GIT_TAG_TO_DEPLOY} --name ${app_name} -d -p 8888:8888 localhost:5000/${app_name}:${GIT_TAG_TO_DEPLOY} 
+                          docker ps
+                        '''
+                    }
+                }
+            }
+        }
+        stage('Integration tests') {
+            options {
+                timeout(time: 30, unit: 'SECONDS')
+            }
+            steps {
+                script {
+                    sh '''
+                        docker ps
+                        docker logs ${app_name} 2>&1 |grep TAG | grep ${GIT_TAG_TO_DEPLOY}
+                        curl ${app_name}:8888 | grep ${GIT_TAG_TO_DEPLOY}
+                        # add integration tests here
+                    '''
+                }
+            }
+        }
+    }
+    // post {
+    //      success {
+    //        // writeFile file: "output/base_image_tag.txt", text: "${env.BASE_IMAGE}"
+    //         archiveArtifacts artifacts: 'output/*'
+    //      }
+    // }
+}
+

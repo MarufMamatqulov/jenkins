@@ -1,0 +1,12 @@
+FROM python:3-alpine
+
+COPY . /app
+
+WORKDIR /app
+
+RUN pip install Flask
+
+RUN flask --app flaskr init-db
+EXPOSE 8888
+
+ENTRYPOINT  flask --app flaskr run --debug --port=8888 --host=0.0.0.0
